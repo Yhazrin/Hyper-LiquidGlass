@@ -38,6 +38,49 @@ final class LiquidGlassInstaller {
      */
     private static final int MAX_ATTEMPTS = 40;
     private static final long RETRY_DELAY_MS = 250L;
+    private static boolean sHomeResumed;
+    private static Runnable sInstallTask;
+    private static WeakReference<View> sInstallDecor = new WeakReference<>(null);
+
+    static boolean isRenderingActive(View view) {
+        Activity activity = sActivityRef.get();
+        return sHomeResumed && activity != null && !activity.isFinishing()
+                && !activity.isDestroyed() && view != null && view.isAttachedToWindow()
+                && view.getWindowVisibility() == View.VISIBLE && view.isShown()
+                && view.getRootView() == activity.getWindow().getDecorView().getRootView();
+    }
+
+    private static void cancelInstall() {
+        View decor = sInstallDecor.get();
+        if (decor != null && sInstallTask != null) decor.removeCallbacks(sInstallTask);
+        sInstallTask = null;
+    }
+
+    private static void postInstall(Activity activity, View decor, int attempt, long delay) {
+        cancelInstall();
+        sInstallDecor = new WeakReference<>(decor);
+        sInstallTask = () -> {
+            sInstallTask = null;
+            tryInstall(activity, decor, attempt);
+        };
+        decor.postDelayed(sInstallTask, delay);
+    }
+
+    static void suspend(Activity activity) {
+        if (activity != sActivityRef.get()) return;
+        sHomeResumed = false;
+        cancelInstall();
+        sPageExtent.cancel();
+        LiquidGlassHostLayout host = sHostRef.get();
+        if (host != null) {
+            host.removeCallbacks(sPageBarSettle);
+            host.suspendWork();
+            BiliTabMirror.suspend(host);
+        }
+        if (sDrag != null) sDrag.suspend();
+        sPageBarDisagreeSinceMs = 0L;
+        GlassMetrics.end();
+    }
 
     /** Scratch for on-screen positions; every use is on the UI thread. */
     private static final int[] sLoc = new int[2];
@@ -158,16 +201,19 @@ final class LiquidGlassInstaller {
         // Kept for extendUnderNavBar: WeChat's views hand out a context that does
         // not wrap the Activity, so the window is not reachable from them.
         sActivityRef = new WeakReference<>(activity);
+        sHomeResumed = true;
+        GlassMetrics.begin();
         View decor = activity.getWindow().getDecorView();
         if (sHostRef.get() == null) {
             hideStockBarUntilInstalled(decor);
         }
-        decor.post(() -> tryInstall(activity, decor, 0));
+        postInstall(activity, decor, 0, 0L);
     }
 
     private static void tryInstall(Activity activity, View decor, int attempt) {
         try {
-            if (activity.isFinishing() || activity.isDestroyed()) {
+            if (!sHomeResumed || activity != sActivityRef.get()
+                    || activity.isFinishing() || activity.isDestroyed()) {
                 return;
             }
             // Only skip if the pill is live in *this* window. WeChat's process
@@ -193,9 +239,7 @@ final class LiquidGlassInstaller {
                 }
                 if (sHostRef.get() == null) {
                     if (attempt < MAX_ATTEMPTS) {
-                        decor.postDelayed(
-                                () -> tryInstall(activity, decor, attempt + 1),
-                                RETRY_DELAY_MS);
+                        postInstall(activity, decor, attempt + 1, RETRY_DELAY_MS);
                     } else if (tabView == null) {
                         LiquidGlassModule.log(android.util.Log.WARN,
                                 "tab bar not found after " + MAX_ATTEMPTS
@@ -216,6 +260,8 @@ final class LiquidGlassInstaller {
 
     /** Drops references to a previous Activity's views so a relaunch reinstalls. */
     private static void resetState() {
+        sPageExtent.cancel();
+        if (sDrag != null) sDrag.suspend();
         sHostRef = new WeakReference<>(null);
         sTabViewRef = new WeakReference<>(null);
         sGlassRef = new WeakReference<>(null);
@@ -1761,7 +1807,7 @@ final class LiquidGlassInstaller {
 
     private static void installSelectionWatcher(LiquidGlassHostLayout host) {
         host.getViewTreeObserver().addOnPreDrawListener(() -> {
-            if (host != sHostRef.get() || !host.isAttachedToWindow()) {
+            if (host != sHostRef.get() || !isRenderingActive(host)) {
                 return true;
             }
             // First, and on its own: anything below must not be able to stop the
@@ -1841,7 +1887,7 @@ final class LiquidGlassInstaller {
     /** Draws the frame that settles a disagreement, in case nothing else would. */
     private static final Runnable sPageBarSettle = () -> {
         LiquidGlassHostLayout host = sHostRef.get();
-        if (host != null && sPageBarDisagreeSinceMs != 0L) {
+        if (isRenderingActive(host) && sPageBarDisagreeSinceMs != 0L) {
             host.invalidate();
         }
     };
@@ -1908,7 +1954,7 @@ final class LiquidGlassInstaller {
      */
     private static final ClockThrottle sPageExtent = new ClockThrottle(500L, () -> {
         ViewGroup pager = sPagerRef.get();
-        if (pager != null && pager.isAttachedToWindow()) {
+        if (isRenderingActive(sHostRef.get()) && pager != null && pager.isAttachedToWindow()) {
             extendPagesToBottom(pager);
         }
     });

@@ -75,6 +75,26 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
 
     private long mLastFrameNs;
     private boolean mFrameScheduled;
+    private final Choreographer.FrameCallback mFrameCallback = this::onFrame;
+
+    void suspend() {
+        Choreographer.getInstance().removeFrameCallback(mFrameCallback);
+        mFrameScheduled = false;
+        mDragging = false;
+        mGestureEligible = false;
+        mActivePointerId = -1;
+        mReleasePending = false;
+        mLastFrameNs = 0L;
+        mLastSampleMs = 0L;
+        int selected = TabBarBridge.selectedIndex(mTabRowRef.get());
+        mValue.snapTo(selected >= 0 ? selected : mValue.target());
+        mVelocity.snapTo(0f);
+        mPress.snapTo(0f);
+        mScaleX.snapTo(1f);
+        mScaleY.snapTo(1f);
+        // Restore transform state once; no future animation frames are booked.
+        apply();
+    }
 
     /** Scratch for native tab positions; every use is on the UI thread. */
     private final int[] mPos = new int[2];
@@ -364,16 +384,21 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
     /* ---------------- frame loop ---------------- */
 
     private void schedule() {
-        if (mFrameScheduled) {
+        if (mFrameScheduled || !LiquidGlassInstaller.isRenderingActive(mHostRef.get())) {
             return;
         }
         mFrameScheduled = true;
         mLastFrameNs = 0L;
-        Choreographer.getInstance().postFrameCallback(this::onFrame);
+        Choreographer.getInstance().postFrameCallback(mFrameCallback);
     }
 
     private void onFrame(long frameNs) {
         mFrameScheduled = false;
+        if (!LiquidGlassInstaller.isRenderingActive(mHostRef.get())) {
+            suspend();
+            return;
+        }
+        GlassMetrics.animationFrame();
         float dt = mLastFrameNs == 0L ? 1f / 60f : (frameNs - mLastFrameNs) / 1e9f;
         mLastFrameNs = frameNs;
 
@@ -395,7 +420,7 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
 
         if (running || mReleasePending || mDragging) {
             mFrameScheduled = true;
-            Choreographer.getInstance().postFrameCallback(this::onFrame);
+            Choreographer.getInstance().postFrameCallback(mFrameCallback);
         }
     }
 

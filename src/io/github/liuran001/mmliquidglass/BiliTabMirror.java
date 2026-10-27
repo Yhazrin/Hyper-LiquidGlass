@@ -41,6 +41,8 @@ final class BiliTabMirror {
     private static boolean sUnavailable;
     private static String sKeySample = "";
 
+    private static Class<?> sComposeType;
+    private static Method sOwnerGetter;
     private static Method sRootMethod;
     private static Method sBoundsMethod;
     private static Method sChildrenMethod;
@@ -61,20 +63,23 @@ final class BiliTabMirror {
         int layoutKey = Integer.MIN_VALUE;
         boolean ready;
         boolean refreshPosted;
+        int layoutRetries;
+        int retryLayoutKey = Integer.MIN_VALUE;
         final Runnable refresh = () -> {
             refreshPosted = false;
             lastSyncMs = 0L;
-            if (isAttachedToWindow() && getParent() instanceof View) {
-                // The following pre-draw may read immediately. Do not sync here
-                // then invalidate: that creates an idle polling loop.
-                ((View) getParent()).postInvalidateOnAnimation();
+            if (getParent() instanceof LiquidGlassHostLayout
+                    && LiquidGlassInstaller.isRenderingActive(this)) {
+                // Posted outside traversal: safe to update layout. Only real
+                // selection/geometry changes invalidate, not this timer itself.
+                sync((LiquidGlassHostLayout) getParent());
             }
         };
 
         Mirror(android.content.Context context) { super(context); }
 
         void requestRefresh(long delay) {
-            if (!refreshPosted && isAttachedToWindow()) {
+            if (!refreshPosted && LiquidGlassInstaller.isRenderingActive(this)) {
                 refreshPosted = true;
                 postDelayed(refresh, Math.max(1L, delay));
             }
@@ -91,6 +96,17 @@ final class BiliTabMirror {
     }
 
     private BiliTabMirror() { }
+
+    static void suspend(LiquidGlassHostLayout host) {
+        ViewGroup row = findMirror(host);
+        if (row instanceof Mirror) {
+            Mirror mirror = (Mirror) row;
+            mirror.removeCallbacks(mirror.refresh);
+            mirror.refreshPosted = false;
+            mirror.lastSyncMs = 0L;
+            mirror.layoutRetries = 0;
+        }
+    }
 
     static boolean isMirrorColumn(View view) {
         return view != null && view.getTag() == COLUMN;
@@ -126,7 +142,8 @@ final class BiliTabMirror {
 
     /** Refreshes the mirror. No-op for the other hosts, and throttled on this one. */
     static void sync(LiquidGlassHostLayout host) {
-        if (LiquidGlassModule.app() != HostApp.BILIBILI || host == null) {
+        if (LiquidGlassModule.app() != HostApp.BILIBILI
+                || !LiquidGlassInstaller.isRenderingActive(host)) {
             return;
         }
         View tabView = findTab(host);
@@ -137,14 +154,20 @@ final class BiliTabMirror {
         Mirror state = (Mirror) mirror;
         long now = SystemClock.uptimeMillis();
         long elapsed = now - state.lastSyncMs;
-        if (state.ready && elapsed < SYNC_INTERVAL_MS) {
+        if (state.lastSyncMs != 0L && elapsed < SYNC_INTERVAL_MS) {
             // Guarantee a final read even if the native click stops drawing
             // before the throttle expires. At most one callback per bar.
             state.requestRefresh(SYNC_INTERVAL_MS - elapsed);
             return;
         }
+        // A natural frame can beat the pending timer; consume it once.
+        state.removeCallbacks(state.refresh);
+        state.refreshPosted = false;
         state.lastSyncMs = now;
-        List<Hit> slots = readSlots(tabView);
+        long started = System.nanoTime();
+        List<Hit> slots;
+        try { slots = readSlots(tabView); }
+        finally { GlassMetrics.semantics(System.nanoTime() - started); }
         if (slots.size() < 3) {
             state.ready = false;
             return;
@@ -157,12 +180,18 @@ final class BiliTabMirror {
         key = key * 31 + host.getLayoutDirection();
         key = key * 31 + (host.getParent() instanceof View
                 ? ((View) host.getParent()).getWidth() : 0);
+        if (key != state.retryLayoutKey) {
+            state.retryLayoutKey = key;
+            state.layoutRetries = 0;
+        }
         if (key != state.layoutKey || !state.ready) {
             state.ready = layOut(host, mirror, tabView, slots);
             if (state.ready) {
                 state.layoutKey = key;
+                state.layoutRetries = 0;
             } else {
-                state.requestRefresh(SYNC_INTERVAL_MS);
+                // Bound startup retries; after ~512ms wait for native changes.
+                if (state.layoutRetries++ < 8) state.requestRefresh(SYNC_INTERVAL_MS);
                 return;
             }
         } else {
@@ -450,7 +479,13 @@ final class BiliTabMirror {
         }
         try {
             View compose = findCompose(tabView);
-            Object owner = compose.getClass().getMethod("getSemanticsOwner").invoke(compose);
+            Class<?> composeType = compose.getClass();
+            if (sOwnerGetter == null || sComposeType != composeType) {
+                // Bind the class only after successful lookup; retry transient failure.
+                sOwnerGetter = composeType.getMethod("getSemanticsOwner");
+                sComposeType = composeType;
+            }
+            Object owner = sOwnerGetter.invoke(compose);
             if (owner == null) {
                 return Collections.emptyList();
             }

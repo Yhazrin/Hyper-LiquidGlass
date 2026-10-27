@@ -92,6 +92,29 @@ public class LiquidGlassModule extends XposedModule {
         }
         sApp = app;
         try {
+            // Composition may happen inside onCreate, before the first onResume.
+            // Cover both Instrumentation onCreate overloads without touching other apps.
+            if (app == HostApp.BILIBILI) {
+                for (Method method : Instrumentation.class.getMethods()) {
+                    Class<?>[] args = method.getParameterTypes();
+                    if (method.getName().equals("callActivityOnCreate")
+                            && args.length >= 2 && args[0] == Activity.class) {
+                        hookIntercept(method, chain -> {
+                            Activity activity = (Activity) chain.getArg(0);
+                            if (app.launcherActivity.equals(activity.getClass().getName())) {
+                                BiliGlass.prepare(activity);
+                            }
+                            return chain.proceed();
+                        });
+                    }
+                }
+            }
+            Method callOnPause = Instrumentation.class.getMethod(
+                    "callActivityOnPause", Activity.class);
+            hookIntercept(callOnPause, chain -> {
+                LiquidGlassInstaller.suspend((Activity) chain.getArg(0));
+                return chain.proceed();
+            });
             Method callOnResume = Instrumentation.class.getMethod(
                     "callActivityOnResume", Activity.class);
             hook(callOnResume)

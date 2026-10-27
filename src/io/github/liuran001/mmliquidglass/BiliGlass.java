@@ -29,10 +29,10 @@ final class BiliGlass {
     /** Unknown versions keep their original bar rather than guessing obfuscated names. */
     static boolean prepare(Context context) {
         if (!sVersionChecked) {
-            sVersionChecked = true;
             try {
                 PackageInfo info = context.getPackageManager().getPackageInfo("tv.danmaku.bili", 0);
                 sSupported = "9.16.1".equals(info.versionName) && info.versionCode == 9161100;
+                sVersionChecked = true;
                 LiquidGlassModule.log(android.util.Log.INFO, "bili adapter: version="
                         + info.versionName + " code=" + info.versionCode
                         + " supported=" + sSupported + " hooksReady=" + sReady);
@@ -81,7 +81,7 @@ final class BiliGlass {
                 LiquidGlassModule.hookIntercept(method, chain ->
                         isChrome() ? transparent : chain.proceed());
             }
-            // Optional skin handling retains the actual composable and slot table.
+            // Require skin handling too: never install a pill over unsupported native chrome.
             installSkinAlpha(cl);
             LiquidGlassModule.hookIntercept(invoke, chain -> {
                 if (!sSupported || !sReady) return chain.proceed();
@@ -133,8 +133,9 @@ final class BiliGlass {
         });
     }
 
-    private static void installSkinAlpha(ClassLoader cl) {
-        try {
+    private static void installSkinAlpha(ClassLoader cl) throws Exception {
+        int installed = 0;
+        {
             Class<?> modifier = cl.loadClass("androidx.compose.ui.Modifier");
             Method alpha = cl.loadClass("androidx.compose.ui.draw.AlphaKt")
                     .getMethod("alpha", modifier, float.class);
@@ -142,6 +143,7 @@ final class BiliGlass {
                 Class<?>[] args = method.getParameterTypes();
                 if (!method.getName().equals("BiliImage") || args.length < 2 || args[1] != modifier) continue;
                 Method urlGetter = args[0].getMethod("takeImageUrl");
+                installed++;
                 LiquidGlassModule.hookIntercept(method, chain -> {
                     Scope scope = SCOPE.get();
                     if (isChrome() && scope.backgroundUrl != null && !scope.backgroundUrl.isEmpty()
@@ -153,9 +155,7 @@ final class BiliGlass {
                     return chain.proceed();
                 });
             }
-        } catch (Throwable error) {
-            // Preserve an unsupported skin rather than dropping images or groups.
-            LiquidGlassModule.logErr("bili skin transparency unavailable; native skin retained", error);
         }
+        if (installed == 0) throw new NoSuchMethodException("BiliImage skin boundary");
     }
 }
