@@ -80,7 +80,46 @@ final class HostApp {
             true,
             "com.tencent.mobileqq.");
 
-    private static final HostApp[] ALL = {WECHAT, QQ};
+    // Experimental: semantic discovery only; no unverified app class names/hooks.
+    static final HostApp BILIBILI = experimental("tv.danmaku.bili", "tv.danmaku.bili.MainActivityV2",
+            new NavigationProfile(4, 5,
+                    new String[]{"首页", "动态", "会员购", "我的", "会员", "发布"}, "首页", "动态", "我的"));
+    static final HostApp DOUYIN = experimental("com.ss.android.ugc.aweme",
+            "com.ss.android.ugc.aweme.main.MainActivity",
+            new NavigationProfile(4, 5,
+                    new String[]{"首页", "朋友", "消息", "我", "商城", "同城", "发布"}, "首页", "消息", "我"));
+    static final HostApp MEITUAN = experimental("com.sankuai.meituan",
+            new NavigationProfile(4, 5,
+                    new String[]{"首页", "发现", "视频", "消息", "我的", "订单", "购物车", "圈圈"}, "首页", "我的"));
+    static final HostApp WAIMAI = experimental("com.sankuai.meituan.takeoutnew",
+            new NavigationProfile(3, 5,
+                    new String[]{"首页", "外卖", "闪购", "消息", "订单", "我的", "神抢手"}, "订单", "我的"));
+
+    private static final HostApp[] ALL = {WECHAT, QQ, BILIBILI, DOUYIN, MEITUAN, WAIMAI};
+
+    /** Non-null only for hosts awaiting device validation. */
+    NavigationProfile navigationProfile;
+
+    boolean isExperimental() {
+        return navigationProfile != null;
+    }
+
+    private static HostApp experimental(String pkg, NavigationProfile profile) {
+        return experimental(pkg, "", profile);
+    }
+
+    private static HostApp experimental(String pkg, String homeActivity, NavigationProfile profile) {
+        // Public-source evidence for named entry points is recorded in docs/host-research.md.
+        HostApp app = new HostApp(pkg, homeActivity, new String[0], new String[0], "",
+                new String[0], new String[0], true, pkg + ".");
+        app.navigationProfile = profile;
+        return app;
+    }
+
+    boolean acceptsActivity(String packageName, String className) {
+        return pkg.equals(packageName) && (launcherActivity.isEmpty()
+                ? isExperimental() : launcherActivity.equals(className));
+    }
 
     /** Package name, which is also the name of the process the home screen lives in. */
     final String pkg;

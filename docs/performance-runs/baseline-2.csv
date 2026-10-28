@@ -1,0 +1,5 @@
+scenario,median_batch_ns_per_op,p95_batch_ns_per_op,allocated_bytes_per_op
+profile_valid,260,774,1109.6
+locate_613_nodes,2115,4589,4472.0
+findRow_stable,289,523,1976.0
+findRow_120fps_with_revalidation,287,528,1976.0

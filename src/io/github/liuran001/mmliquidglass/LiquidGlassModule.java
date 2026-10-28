@@ -103,7 +103,7 @@ public class LiquidGlassModule extends XposedModule {
                             if (arg0 instanceof Activity) {
                                 Activity activity = (Activity) arg0;
                                 String name = arg0.getClass().getName();
-                                if (app.launcherActivity.equals(name)) {
+                                if (app.acceptsActivity(activity.getPackageName(), name)) {
                                     GlassConfig.load(activity);
                                     sResumeHits++;
                                     if (sResumeHits <= 3 || sResumeHits % 20 == 0) {

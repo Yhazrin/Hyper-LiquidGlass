@@ -1,0 +1,58 @@
+{
+  "baseline": {
+    "profile_valid": {
+      "median_batch_ns_per_op": 260.0,
+      "p95_batch_ns_per_op": 816.0,
+      "allocated_bytes_per_op": 1109.3
+    },
+    "locate_613_nodes": {
+      "median_batch_ns_per_op": 2184.0,
+      "p95_batch_ns_per_op": 4589.0,
+      "allocated_bytes_per_op": 4472.0
+    },
+    "findRow_stable": {
+      "median_batch_ns_per_op": 289.0,
+      "p95_batch_ns_per_op": 544.0,
+      "allocated_bytes_per_op": 1976.0
+    },
+    "findRow_120fps_with_revalidation": {
+      "median_batch_ns_per_op": 287.0,
+      "p95_batch_ns_per_op": 643.0,
+      "allocated_bytes_per_op": 1976.0
+    }
+  },
+  "optimized": {
+    "profile_valid": {
+      "median_batch_ns_per_op": 61.0,
+      "p95_batch_ns_per_op": 1064.0,
+      "allocated_bytes_per_op": 0.0
+    },
+    "locate_613_nodes": {
+      "median_batch_ns_per_op": 2247.0,
+      "p95_batch_ns_per_op": 2725.0,
+      "allocated_bytes_per_op": 168.0
+    },
+    "findRow_stable": {
+      "median_batch_ns_per_op": 40.0,
+      "p95_batch_ns_per_op": 105.0,
+      "allocated_bytes_per_op": 0.0
+    },
+    "findRow_120fps_with_revalidation": {
+      "median_batch_ns_per_op": 43.0,
+      "p95_batch_ns_per_op": 67.0,
+      "allocated_bytes_per_op": 7.7
+    }
+  },
+  "scope": "Desktop JDK 21, deterministic Android View doubles. Not Android ART, GPU time, app FPS, or visual validation. 3 JVM forks per variant; batch medians and p95 are not individual-call percentiles. Steady-state cache is frozen-time; 120fps scenario advances a simulated clock and includes cache revalidation.",
+  "baseline_source_sha256": {
+    "HostApp.java": "42eb05c88c9746a256adb0aa9c73862f6ffe21f773d26ab63c4f984f4e04732e",
+    "GenericTabLocator.java": "c6fa8debd195747ce92e369544b831d48e75e970a6ed1fca7a029f9fb2339662",
+    "NavigationProfile.java": "328d9c3e3812bfbb11eca875677d0959bb38e0ff875f6e5ce47ee21621d72de3"
+  },
+  "tested_source_sha256": {
+    "HostApp.java": "42eb05c88c9746a256adb0aa9c73862f6ffe21f773d26ab63c4f984f4e04732e",
+    "GenericTabLocator.java": "8e5e696f406b97a5bc3319f11fb6272128156cb2a7a371b6e3b9d75ad4c0f182",
+    "NavigationProfile.java": "3e9e9fd2ff4dbae3b28ca1dce88011a090b938a54c2cdb8bd0cd579cc82ee8f3"
+  },
+  "rendering_sources_unchanged_from_HEAD": true
+}

@@ -86,6 +86,11 @@ final class LiquidGlassInstaller {
     private LiquidGlassInstaller() {
     }
 
+    private static boolean experimentalHost() {
+        HostApp app = LiquidGlassModule.app();
+        return app != null && app.isExperimental();
+    }
+
     /**
      * How long the stock bar stays hidden before it is handed back. Sized to
      * outlast the install polling above, so a slow cold start does not flash
@@ -149,6 +154,11 @@ final class LiquidGlassInstaller {
     }
 
     static void scheduleInstall(Activity activity) {
+        LiquidGlassHostLayout existing = sHostRef.get();
+        if (experimentalHost() && existing != null && existing.isAttachedToWindow()
+                && existing.getRootView() != activity.getWindow().getDecorView().getRootView()) {
+            return; // A secondary Activity must not replace the live home binding.
+        }
         // Kept for extendUnderNavBar: WeChat's views hand out a context that does
         // not wrap the Activity, so the window is not reachable from them.
         sActivityRef = new WeakReference<>(activity);
@@ -162,6 +172,15 @@ final class LiquidGlassInstaller {
     private static void tryInstall(Activity activity, View decor, int attempt) {
         try {
             if (activity.isFinishing() || activity.isDestroyed()) {
+                return;
+            }
+            // Do not let a pending retry from a background Activity clear the
+            // foreground home's binding. Initial resume can precede window focus.
+            if (experimentalHost() && !decor.hasWindowFocus()) {
+                if (attempt < MAX_ATTEMPTS) {
+                    decor.postDelayed(() -> tryInstall(activity, decor, attempt + 1),
+                            RETRY_DELAY_MS);
+                }
                 return;
             }
             // Only skip if the pill is live in *this* window. WeChat's process
@@ -202,6 +221,7 @@ final class LiquidGlassInstaller {
 
     /** Drops references to a previous Activity's views so a relaunch reinstalls. */
     private static void resetState() {
+        GenericTabLocator.clearCache();
         sHostRef = new WeakReference<>(null);
         sTabViewRef = new WeakReference<>(null);
         sGlassRef = new WeakReference<>(null);
@@ -249,6 +269,10 @@ final class LiquidGlassInstaller {
             return; // already installed
         }
 
+        if (experimentalHost() && (!GenericTabLocator.supportsLayout(tabView)
+                || TabBarBridge.findTabRow(tabView) == null)) {
+            return;
+        }
         ViewGroup backdrop = findBackdrop(parent, tabView);
         if (backdrop == null) {
             LiquidGlassModule.log(android.util.Log.WARN,
@@ -352,14 +376,14 @@ final class LiquidGlassInstaller {
         sBarHeight = barHeight;
         sLastIndex = -1;
 
-        TabBarBridge.tryHookPager(backdrop);
+        if (!experimentalHost()) TabBarBridge.tryHookPager(backdrop);
 
         // Cosmetic cleanup cannot invalidate the structural install. If an app
         // skin changes one of these details, keep the functional floating bar
         // and report the degraded effect rather than trying to tear it back out.
         try {
             hideOwnBlurLayers(parent, tabView);
-            hideBarHairline(parent, tabView);
+            if (!experimentalHost()) hideBarHairline(parent, tabView);
             stripSolidBackgrounds(tabView);
             disableTabWidgetStrips(tabView);
         } catch (Throwable t) {
@@ -385,10 +409,10 @@ final class LiquidGlassInstaller {
         // Open up clipping all the way to the content root: the droplet grows
         // past the pill while dragging, and any ancestor still clipping its
         // children would shear that overflow off.
-        unclipAncestors(parent);
+        if (!experimentalHost()) unclipAncestors(parent);
         attachRenderer(ctx, host, backdrop, density);
         installSelectionWatcher(host);
-        watchBottomInset(host, backdrop);
+        if (!experimentalHost()) watchBottomInset(host, backdrop);
 
         host.getViewTreeObserver().addOnGlobalLayoutListener(
                 new ViewTreeObserver.OnGlobalLayoutListener() {
@@ -530,6 +554,7 @@ final class LiquidGlassInstaller {
      * layout listener that re-stretches it whenever that happens.
      */
     private static void extendPagesToBottom(ViewGroup pager) {
+        if (experimentalHost()) return;
         if (pager == null) {
             return;
         }
@@ -588,6 +613,7 @@ final class LiquidGlassInstaller {
      * NoSuchMethod path once and are never probed again.
      */
     private static void dropBottomFrostAll() {
+        if (experimentalHost()) return;
         ViewGroup pager = sPagerRef.get();
         if (pager == null) {
             return;
@@ -1126,6 +1152,7 @@ final class LiquidGlassInstaller {
      * width.
      */
     private static int hugContentWidth(ViewGroup tabRow, float density) {
+        if (experimentalHost()) return 0; // Preserve custom tab widths / publish buttons.
         if (tabRow == null || tabRow.getChildCount() == 0) {
             return 0;
         }
@@ -1383,6 +1410,7 @@ final class LiquidGlassInstaller {
      * show it again, and this runs first in every one of them.
      */
     private static void keepNavBarClear() {
+        if (experimentalHost()) return;
         Activity a = sActivityRef.get();
         if (a == null) {
             return;
@@ -1458,6 +1486,13 @@ final class LiquidGlassInstaller {
         ViewGroup current = TabBarBridge.findTabRow((ViewGroup) tabView);
         if (current == null || current.getVisibility() != View.VISIBLE
                 || TabBarBridge.tabCount(current) == 0) {
+            if (experimentalHost()) {
+                // A skin/gray rollout can replace labels without replacing the
+                // row object. Never leave the old highlight on an unknown row.
+                View droplet = sDropletRef.get();
+                if (droplet != null) droplet.setVisibility(View.INVISIBLE);
+                sLastIndex = -1;
+            }
             // QQ briefly detaches/empties Material's indicator while applying
             // the setting. Keep the old binding untouched and retry next frame
             // — but not indefinitely: a row that never comes back would
@@ -1519,16 +1554,20 @@ final class LiquidGlassInstaller {
                 tabView.setLayoutParams(tabLp);
             }
             float density = host.getResources().getDisplayMetrics().density;
-            int barWidth = hugContentWidth(tabRow, density);
-            if (barWidth <= 0) {
-                return; // not laid out yet; leave the old signature so we retry
-            }
             ViewGroup.LayoutParams lp = host.getLayoutParams();
-            int desired = barWidth + host.shadowPad() * 2;
-            if (lp != null && lp.width != desired) {
-                lp.width = desired;
-                host.setLayoutParams(lp);
+            if (!experimentalHost()) {
+                int barWidth = hugContentWidth(tabRow, density);
+                if (barWidth <= 0) {
+                    return; // not laid out yet; leave the old signature so we retry
+                }
+                int desired = barWidth + host.shadowPad() * 2;
+                if (lp != null && lp.width != desired) {
+                    lp.width = desired;
+                    host.setLayoutParams(lp);
+                }
             }
+            // Experimental hosts deliberately retain native widths. A zero
+            // hug result there must not prevent committing the new row/signature.
 
             sTabRowRef = new WeakReference<>(tabRow);
             sTabStructureSignature = tabStructureSignature(tabRow);
@@ -1615,11 +1654,18 @@ final class LiquidGlassInstaller {
                 // surgery on layout passes of their own, and a scroller that
                 // has gone back to clipping its padding paints an opaque band
                 // over the content it is scrolling.
-                maintainScrollerPadding();
-                sPageExtent.request();
+                if (!experimentalHost()) {
+                    maintainScrollerPadding();
+                    sPageExtent.request();
+                }
                 maintainDropletGeometry();
                 ViewGroup tabRow = sTabRowRef.get();
                 int sel = visibleTabSelection(tabRow);
+                if (experimentalHost() && sel < 0) {
+                    View droplet = sDropletRef.get();
+                    if (droplet != null) droplet.setVisibility(View.INVISIBLE);
+                    sLastIndex = -1;
+                }
                 if (sel >= 0 && sel != sLastIndex) {
                     boolean first = sLastIndex < 0;
                     sLastIndex = sel;
@@ -1630,7 +1676,7 @@ final class LiquidGlassInstaller {
                         sDrag.animateToIndex(sel, first);
                     }
                     ViewGroup pgr = sPagerRef.get();
-                    if (pgr != null) {
+                    if (pgr != null && !experimentalHost()) {
                         pgr.post(() -> extendPagesToBottom(pgr));
                     }
                 }
@@ -1672,6 +1718,7 @@ final class LiquidGlassInstaller {
      */
     private static int visibleTabSelection(ViewGroup tabRow) {
         int selected = TabBarBridge.selectedIndex(tabRow);
+        if (experimentalHost()) return selected;
         int page = TabBarBridge.pageSlot(sPagerRef.get(), tabRow);
         LiquidGlassHostLayout host = sHostRef.get();
         if (page < 0 || page == selected) {
@@ -1740,6 +1787,13 @@ final class LiquidGlassInstaller {
                     || (app != null && app.isHiddenSibling(c.getClass().getName()))) {
                 continue;
             }
+            if (experimentalHost() && (!c.isShown() || c.getAlpha() <= 0f
+                    || i >= parent.indexOfChild(tabView)
+                    || c.getWidth() < parent.getWidth() * 0.8f
+                    || c.getHeight() < parent.getHeight() * 0.75f
+                    || c.getTop() + c.getHeight() < tabView.getTop() + tabView.getHeight())) {
+                continue;
+            }
             int area = c.getWidth() * c.getHeight();
             if (area > bestArea) {
                 bestArea = area;
@@ -1755,6 +1809,16 @@ final class LiquidGlassInstaller {
      * anything else (badge shapes, ripples) is left alone.
      */
     private static void stripSolidBackgrounds(View v) {
+        if (experimentalHost()) {
+            // Keep item backgrounds, ripples, publish buttons, and badges intact.
+            if (v.getBackground() instanceof ColorDrawable) v.setBackground(null);
+            ViewGroup row = v instanceof ViewGroup
+                    ? TabBarBridge.findTabRow((ViewGroup) v) : null;
+            if (row != null && row.getBackground() instanceof ColorDrawable) {
+                row.setBackground(null);
+            }
+            return;
+        }
         // The bar and its row are drawn by the glass now, so clear their
         // backgrounds outright rather than only flat fills: WeChat paints the
         // bar's hairline top divider through a non-ColorDrawable background, and
@@ -1995,8 +2059,8 @@ final class LiquidGlassInstaller {
         if (Build.VERSION.SDK_INT < 30) {
             return false;
         }
-        if (LiquidGlassModule.app() == HostApp.QQ) {
-            return false; // QQ NT breaks IME window insets if the root decor is hijacked
+        if (experimentalHost() || LiquidGlassModule.app() == HostApp.QQ) {
+            return false; // Preserve unverified hosts' window/IME inset handling
         }
         try {
             Activity activity = activityOf(ctx);
@@ -2249,7 +2313,9 @@ final class LiquidGlassInstaller {
                 sDrag = new DropletDragController(droplet, tabRow, density, night);
                 sDrag.setPill(glass);
                 sDrag.setHost(host);
-                host.setDragHandler(sDrag);
+                // Experimental hosts retain native touch handling, including publish actions.
+                // The controller still animates programmatic selected-state changes.
+                if (!experimentalHost()) host.setDragHandler(sDrag);
             }
 
             LiquidGlassModule.log(android.util.Log.INFO,

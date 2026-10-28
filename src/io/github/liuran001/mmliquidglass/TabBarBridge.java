@@ -40,6 +40,11 @@ final class TabBarBridge {
         if (sHooked) {
             return;
         }
+        if (app.isExperimental()) {
+            LiquidGlassModule.log(android.util.Log.INFO,
+                    "experimental semantic discovery for " + app + "; no app method hooks");
+            return;
+        }
         int hooked = 0;
         Set<Method> bound = new HashSet<>();
         for (String className : app.tabViewClasses) {
@@ -137,6 +142,10 @@ final class TabBarBridge {
      * control into a floating pill and break the app.
      */
     static ViewGroup locateTabView(View root) {
+        HostApp app = LiquidGlassModule.app();
+        if (app != null && app.isExperimental()) {
+            return GenericTabLocator.locate(root, app.navigationProfile);
+        }
         ViewGroup byName = findTabView(root);
         if (byName != null) {
             return byName;
@@ -300,6 +309,10 @@ final class TabBarBridge {
         if (tabView == null) {
             return null;
         }
+        HostApp app = LiquidGlassModule.app();
+        if (app != null && app.isExperimental()) {
+            return GenericTabLocator.findRow(tabView, app.navigationProfile);
+        }
         ViewGroup hiddenFallback = null;
         for (int i = 0; i < tabView.getChildCount(); i++) {
             View c = tabView.getChildAt(i);
@@ -422,21 +435,34 @@ final class TabBarBridge {
      * both reliable and free to poll.
      */
     static int selectedIndex(ViewGroup tabRow) {
-        if (tabRow == null) {
-            return -1;
-        }
+        if (tabRow == null) return -1;
+        HostApp app = LiquidGlassModule.app();
+        boolean nested = app != null && app.isExperimental();
         int slot = 0;
+        int selected = -1;
         for (int i = 0; i < tabRow.getChildCount(); i++) {
             View c = tabRow.getChildAt(i);
-            if (c.getVisibility() == View.GONE) {
-                continue;
-            }
-            if (c.isSelected()) {
-                return slot;
+            if (c.getVisibility() == View.GONE) continue;
+            if (c.isSelected() || (nested && hasSelection(c, 0))) {
+                if (!nested) return slot; // Preserve the established hosts' selection policy.
+                if (selected >= 0) return -1; // ambiguous; do not guess a page
+                selected = slot;
             }
             slot++;
         }
-        return -1;
+        return selected;
+    }
+
+    private static boolean hasSelection(View view, int depth) {
+        if (depth > 12 || view.getVisibility() != View.VISIBLE) return false;
+        if (view.isSelected() || view.isActivated()) return true;
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                if (hasSelection(group.getChildAt(i), depth + 1)) return true;
+            }
+        }
+        return false;
     }
 
     /**
