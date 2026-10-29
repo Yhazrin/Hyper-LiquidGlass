@@ -38,12 +38,56 @@ final class LiquidGlassInstaller {
      */
     private static final int MAX_ATTEMPTS = 40;
     private static final long RETRY_DELAY_MS = 250L;
+    private static boolean sHomeResumed;
+    private static Runnable sInstallTask;
+    private static WeakReference<View> sInstallDecor = new WeakReference<>(null);
+
+    static boolean isRenderingActive(View view) {
+        Activity activity = sActivityRef.get();
+        return sHomeResumed && activity != null && !activity.isFinishing()
+                && !activity.isDestroyed() && view != null && view.isAttachedToWindow()
+                && view.getWindowVisibility() == View.VISIBLE && view.isShown()
+                && view.getRootView() == activity.getWindow().getDecorView().getRootView();
+    }
+
+    private static void cancelInstall() {
+        View decor = sInstallDecor.get();
+        if (decor != null && sInstallTask != null) decor.removeCallbacks(sInstallTask);
+        sInstallTask = null;
+    }
+
+    private static void postInstall(Activity activity, View decor, int attempt, long delay) {
+        cancelInstall();
+        sInstallDecor = new WeakReference<>(decor);
+        sInstallTask = () -> {
+            sInstallTask = null;
+            tryInstall(activity, decor, attempt);
+        };
+        decor.postDelayed(sInstallTask, delay);
+    }
+
+    static void suspend(Activity activity) {
+        if (activity != sActivityRef.get()) return;
+        sHomeResumed = false;
+        cancelInstall();
+        sPageExtent.cancel();
+        LiquidGlassHostLayout host = sHostRef.get();
+        if (host != null) {
+            host.removeCallbacks(sPageBarSettle);
+            host.suspendWork();
+            BiliTabMirror.suspend(host);
+        }
+        if (sDrag != null) sDrag.suspend();
+        sPageBarDisagreeSinceMs = 0L;
+        GlassMetrics.end();
+    }
 
     /** Scratch for on-screen positions; every use is on the UI thread. */
     private static final int[] sLoc = new int[2];
     /** Scratch for host-relative positions; every use is on the UI thread. */
     private static final int[] sPos = new int[2];
     private static boolean sKeepFailed;
+    private static boolean sBackdropMissLogged;
     private static WeakReference<Activity> sActivityRef = new WeakReference<>(null);
     private static WeakReference<LiquidGlassHostLayout> sHostRef = new WeakReference<>(null);
     private static WeakReference<View> sDropletRef = new WeakReference<>(null);
@@ -82,6 +126,8 @@ final class LiquidGlassInstaller {
     /** Geometry the droplet's size and offset were last computed against. */
     private static int sDropletGeometryKey;
     private static boolean sDropletLogged;
+    private static boolean sCapsuleLogged;
+    private static int sCapsuleParentW = -1;
 
     private LiquidGlassInstaller() {
     }
@@ -159,19 +205,25 @@ final class LiquidGlassInstaller {
                 && existing.getRootView() != activity.getWindow().getDecorView().getRootView()) {
             return; // A secondary Activity must not replace the live home binding.
         }
+        if (LiquidGlassModule.app() == HostApp.BILIBILI && !BiliGlass.prepare(activity)) {
+            return;
+        }
         // Kept for extendUnderNavBar: WeChat's views hand out a context that does
         // not wrap the Activity, so the window is not reachable from them.
         sActivityRef = new WeakReference<>(activity);
+        sHomeResumed = true;
+        GlassMetrics.begin();
         View decor = activity.getWindow().getDecorView();
         if (sHostRef.get() == null) {
             hideStockBarUntilInstalled(decor);
         }
-        decor.post(() -> tryInstall(activity, decor, 0));
+        postInstall(activity, decor, 0, 0L);
     }
 
     private static void tryInstall(Activity activity, View decor, int attempt) {
         try {
-            if (activity.isFinishing() || activity.isDestroyed()) {
+            if (!sHomeResumed || activity != sActivityRef.get()
+                    || activity.isFinishing() || activity.isDestroyed()) {
                 return;
             }
             // Do not let a pending retry from a background Activity clear the
@@ -200,20 +252,26 @@ final class LiquidGlassInstaller {
                 resetState();
             }
             ViewGroup tabView = TabBarBridge.locateTabView(decor);
-            if (tabView == null) {
-                if (attempt < MAX_ATTEMPTS) {
-                    decor.postDelayed(
-                            () -> tryInstall(activity, decor, attempt + 1),
-                            RETRY_DELAY_MS);
-                } else {
-                    LiquidGlassModule.log(android.util.Log.WARN,
-                            "tab bar not found after " + MAX_ATTEMPTS
-                                    + " attempts, giving up; tree="
-                                    + TabBarBridge.describeTree(decor));
+            if (tabView == null || sHostRef.get() == null) {
+                if (tabView != null) {
+                    install(tabView);
+                }
+                if (sHostRef.get() == null) {
+                    if (attempt < MAX_ATTEMPTS) {
+                        postInstall(activity, decor, attempt + 1, RETRY_DELAY_MS);
+                    } else if (tabView == null) {
+                        LiquidGlassModule.log(android.util.Log.WARN,
+                                "tab bar not found after " + MAX_ATTEMPTS
+                                        + " attempts, giving up; tree="
+                                        + TabBarBridge.describeTree(decor));
+                    } else {
+                        LiquidGlassModule.log(android.util.Log.WARN,
+                                "backdrop never appeared after " + MAX_ATTEMPTS
+                                        + " attempts");
+                    }
                 }
                 return;
             }
-            install(tabView);
         } catch (Throwable t) {
             LiquidGlassModule.logErr("install failed", t);
         }
@@ -222,6 +280,8 @@ final class LiquidGlassInstaller {
     /** Drops references to a previous Activity's views so a relaunch reinstalls. */
     private static void resetState() {
         GenericTabLocator.clearCache();
+        sPageExtent.cancel();
+        if (sDrag != null) sDrag.suspend();
         sHostRef = new WeakReference<>(null);
         sTabViewRef = new WeakReference<>(null);
         sGlassRef = new WeakReference<>(null);
@@ -241,6 +301,8 @@ final class LiquidGlassInstaller {
         sDropletBaseY = 0f;
         sDropletGeometryKey = 0;
         sDropletLogged = false;
+        sCapsuleLogged = false;
+        sCapsuleParentW = -1;
         sPaddedScrollers.clear();
         sScrollerPad = 0;
         sPageBarDisagreeSinceMs = 0L;
@@ -259,6 +321,126 @@ final class LiquidGlassInstaller {
         return sPagerRef.get();
     }
 
+    /**
+     * Points the droplet at a row this module owns.
+     *
+     * <p>Bilibili's bar is one Compose view, so the row is a mirror laid out from
+     * the bar's accessibility bounds rather than a child of the app's own
+     * widget. Rebinding every frame would cancel the spring; this only acts
+     * when the row object itself changes, or when the drag controller does not
+     * exist yet because the mirror was empty at install.
+     */
+    static void noteSyntheticRow(LiquidGlassHostLayout host, ViewGroup row) {
+        if (host == null || row == null || TabBarBridge.tabCount(row) == 0) {
+            return;
+        }
+        ViewGroup prev = sTabRowRef.get();
+        sTabRowRef = new WeakReference<>(row);
+        // The droplet is created before this mirror exists, so its row is still
+        // null. Without the rebind it slides, but never repaints a column, and
+        // the lens stays blank over the label.
+        View droplet = sDropletRef.get();
+        int signature = tabStructureSignature(row);
+        boolean changed = prev != row || signature != sTabStructureSignature;
+        sTabStructureSignature = signature;
+        if (changed && droplet instanceof DropletPanel) {
+            ((DropletPanel) droplet).setTabRow(row);
+        }
+        if (sDrag != null) {
+            if (changed) {
+                sDrag.setTabRow(row);
+                sLastIndex = -1;
+            }
+            int selected = TabBarBridge.selectedIndex(row);
+            if (selected >= 0) {
+                // Native state wins even when a requested click was declined.
+                sDrag.animateToIndex(selected, changed);
+            }
+            return;
+        }
+        if (droplet == null) {
+            return;
+        }
+        float density = host.getResources().getDisplayMetrics().density;
+        sDrag = new DropletDragController(droplet, row, density, isNight(host.getContext()));
+        View glass = sGlassRef.get();
+        if (glass != null) {
+            sDrag.setPill(glass);
+        }
+        sDrag.setHost(host);
+        host.setDragHandler(sDrag);
+    }
+
+    /**
+     * WeChat's floating column. {@code hugContentWidth} adds 32dp to the label,
+     * and the label it measured on WeChat was 105px at xxhdpi — 35dp — so a
+     * column is 67dp. The bar itself is the 162px WeChat reports at that same
+     * density, 54dp, which leaves the droplet 46dp after the 4dp inset.
+     */
+    private static final float WECHAT_TAB_DP = 67f;
+    private static final float WECHAT_BAR_DP = 54f;
+    private static final float WECHAT_ROW_PAD_DP = 4f;
+
+    /** Bilibili's pill uses WeChat's bar height instead of the docked compose bar. */
+    private static int wechatBarHeight(float density) {
+        return Math.round(density * WECHAT_BAR_DP);
+    }
+
+    /**
+     * Shrinks the pill to WeChat's column width.
+     *
+     * <p>Bilibili's compose bar is match-parent, so a capsule built from the
+     * live cluster is just the docked bar with round ends. WeChat's columns
+     * are not that wide: each one is {@link #WECHAT_TAB_DP}, with the same
+     * 4dp row inset {@code hugContentWidth} applies, and the same screen cap.
+     */
+    /** @return the compose width the capsule is aiming for, or 0 when it cannot */
+    static int fitCapsule(LiquidGlassHostLayout host, int slots) {
+        if (host == null || slots < 3) {
+            return 0;
+        }
+        ViewGroup.LayoutParams lp = host.getLayoutParams();
+        if (lp == null) {
+            return 0;
+        }
+        float density = host.getResources().getDisplayMetrics().density;
+        View parent = host.getParent() instanceof View ? (View) host.getParent() : null;
+        int parentW = parent == null ? 0 : parent.getWidth();
+        int pad = Math.round(density * WECHAT_ROW_PAD_DP);
+        int tabWidth = Math.round(density * WECHAT_TAB_DP);
+        int screen = parentW > 0 ? parentW
+                : host.getResources().getDisplayMetrics().widthPixels;
+        int maxTotal = screen - Math.round(density * 24f) - host.shadowPad() * 2;
+        if (maxTotal <= pad * 2 + slots) {
+            return 0;
+        }
+        if (tabWidth * slots + pad * 2 > maxTotal) {
+            tabWidth = (maxTotal - pad * 2) / slots;
+        }
+        int desired = tabWidth * slots + pad * 2 + host.shadowPad() * 2;
+        // Compare the actual target width, not a process-global parent-width
+        // cache: tab count and density can change without a window resize.
+        if (desired <= 0) {
+            return 0;
+        }
+        int composeW = tabWidth * slots;
+        sCapsuleParentW = parentW;
+        if (Math.abs(lp.width - desired) <= 2) {
+            sCapsuleLogged = true;
+            return composeW;
+        }
+        lp.width = desired;
+        host.setLayoutParams(lp);
+        if (!sCapsuleLogged) {
+            sCapsuleLogged = true;
+            LiquidGlassModule.log(android.util.Log.INFO,
+                    "capsule fitted: tabs=" + slots
+                            + " tabW=" + tabWidth
+                            + " hostW=" + desired);
+        }
+        return composeW;
+    }
+
     private static void install(ViewGroup tabView) {
         ViewGroup parent = tabView.getParent() instanceof ViewGroup
                 ? (ViewGroup) tabView.getParent() : null;
@@ -275,10 +457,15 @@ final class LiquidGlassInstaller {
         }
         ViewGroup backdrop = findBackdrop(parent, tabView);
         if (backdrop == null) {
-            LiquidGlassModule.log(android.util.Log.WARN,
-                    "no backdrop sibling found, glass would refract nothing");
+            if (!sBackdropMissLogged) {
+                sBackdropMissLogged = true;
+                LiquidGlassModule.log(android.util.Log.INFO,
+                        "backdrop not ready under " + parent.getClass().getName()
+                                + " children=" + parent.getChildCount());
+            }
             return;
         }
+        sBackdropMissLogged = false;
 
         int index = parent.indexOfChild(tabView);
         if (index < 0) {
@@ -299,6 +486,11 @@ final class LiquidGlassInstaller {
         // height here, and the reserve is exactly what the pill must not keep.
         ViewGroup tabRow = TabBarBridge.findTabRow(tabView);
         int barHeight = contentBarHeight(tabRow, tabView.getHeight() - navReserve);
+        if (LiquidGlassModule.app() == HostApp.BILIBILI) {
+            // The compose bar is a short docked strip. WeChat's pill is 54dp,
+            // which is what makes its droplet the fuller 46dp shape.
+            barHeight = wechatBarHeight(density);
+        }
 
         // KernelSU's floating bar is width(IntrinsicSize.Min) — it hugs its tabs
         // and floats centred, rather than stretching edge to edge. The width has
@@ -311,24 +503,33 @@ final class LiquidGlassInstaller {
         int shadowPad = host.shadowPad();
 
         TabGeometrySnapshot geometry = new TabGeometrySnapshot(tabView, tabRow);
-        FrameLayout.LayoutParams hostLp = new FrameLayout.LayoutParams(
+        // Bilibili's bar is a bottom-gravity child of a CoordinatorLayout.
+        // FrameLayout.LayoutParams carry the gravity, but CoordinatorLayout
+        // copies only the margins and then lays the child out at the top —
+        // which is the pill floating in the sky. Generate the parent's own
+        // params and write the gravity back onto them.
+        int anchorGravity = android.view.Gravity.BOTTOM
+                | android.view.Gravity.CENTER_HORIZONTAL;
+        ViewGroup.MarginLayoutParams hostLp = anchoredParams(parent,
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                android.view.Gravity.BOTTOM | android.view.Gravity.CENTER_HORIZONTAL);
-        // The navigation inset only counts once the window reaches under it —
-        // either because extendUnderNavBar grew it or because the app already
-        // draws edge to edge. Short of that the pill's parent stops above the
-        // gesture bar, and adding it again floats the pill far too high. Left
-        // out here and applied below, once that is known.
-        // Anchored on the parent, not the bar: the bar is about to be detached,
-        // and a detached view reports no insets at all. Reading from it later
-        // would silently drop the correction and let the bar sink onto the
-        // gesture pill.
-        hostLp.bottomMargin = bottomOffset - shadowPad;
+                anchorGravity, bottomOffset - shadowPad);
+        LiquidGlassModule.log(android.util.Log.INFO,
+                "pill anchor: parent=" + parent.getClass().getName()
+                        + " lp=" + hostLp.getClass().getName()
+                        + " gravity=" + gravityOf(hostLp)
+                        + " bottomMargin=" + hostLp.bottomMargin);
         FrameLayout.LayoutParams tabLp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 barHeight > 0 ? barHeight : ViewGroup.LayoutParams.WRAP_CONTENT,
                 android.view.Gravity.TOP | android.view.Gravity.FILL_HORIZONTAL);
+        if (LiquidGlassModule.app() == HostApp.BILIBILI) {
+            // Same 4dp row inset hugContentWidth gives WeChat. Margins, not
+            // padding: padding clips the capsule tips and shifts the glyphs.
+            int rowPad = Math.round(density * WECHAT_ROW_PAD_DP);
+            tabLp.leftMargin = rowPad;
+            tabLp.rightMargin = rowPad;
+        }
 
         // The native bar must never be left detached. All potentially failing
         // setup above runs while it still belongs to the app; this small
@@ -346,6 +547,14 @@ final class LiquidGlassInstaller {
 
         try {
             dropNavReserve(tabView);
+            if (LiquidGlassModule.app() == HostApp.BILIBILI) {
+                // Padding here is a rectangular clip. It slices the tips off
+                // the capsule and shifts the drawn icons 4dp right of the
+                // columns the droplet follows.
+                tabView.setPadding(0, tabView.getPaddingTop(), 0,
+                        tabView.getPaddingBottom());
+                tabView.setClipToPadding(false);
+            }
             int barWidth = hugContentWidth(tabRow, density);
             if (barWidth > 0) {
                 hostLp.width = barWidth + shadowPad * 2;
@@ -413,6 +622,7 @@ final class LiquidGlassInstaller {
         attachRenderer(ctx, host, backdrop, density);
         installSelectionWatcher(host);
         if (!experimentalHost()) watchBottomInset(host, backdrop);
+        BiliTabMirror.attach(host, tabView);
 
         host.getViewTreeObserver().addOnGlobalLayoutListener(
                 new ViewTreeObserver.OnGlobalLayoutListener() {
@@ -431,11 +641,14 @@ final class LiquidGlassInstaller {
                         // The window grows a beat after the flag is set, and the
                         // pages have to be re-stretched into the room that frees.
                         host.postDelayed(() -> extendPagesToBottom(backdrop), 500L);
+                        int[] where = new int[2];
+                        host.getLocationOnScreen(where);
                         LiquidGlassModule.log(android.util.Log.INFO,
                                 "liquid glass installed: hostW=" + host.getWidth()
                                         + " hostH=" + host.getHeight()
                                         + " barH=" + tabView.getHeight()
-                                        + " children=" + host.getChildCount());
+                                        + " children=" + host.getChildCount()
+                                        + " screenY=" + where[1]);
                     }
                 });
     }
@@ -1484,6 +1697,14 @@ final class LiquidGlassInstaller {
             return false;
         }
         ViewGroup current = TabBarBridge.findTabRow((ViewGroup) tabView);
+        ViewGroup bound = sTabRowRef.get();
+        // Bilibili's Compose bar has no row of its own. The mirror we lay over
+        // it lives in the host, and findTabRow will never see it — treating
+        // that as "the row went missing" would freeze the droplet forever.
+        if (bound != null && bound.getParent() == host && bound != tabView) {
+            sTabRowEmptySinceMs = 0L;
+            return false;
+        }
         if (current == null || current.getVisibility() != View.VISIBLE
                 || TabBarBridge.tabCount(current) == 0) {
             if (experimentalHost()) {
@@ -1498,7 +1719,6 @@ final class LiquidGlassInstaller {
             // — but not indefinitely: a row that never comes back would
             // otherwise hold this method's `true` forever, and with it the
             // selection watcher and the droplet.
-            ViewGroup bound = sTabRowRef.get();
             boolean boundUsable = bound != null && bound.isAttachedToWindow()
                     && bound.getVisibility() == View.VISIBLE
                     && TabBarBridge.tabCount(bound) > 0;
@@ -1626,7 +1846,7 @@ final class LiquidGlassInstaller {
 
     private static void installSelectionWatcher(LiquidGlassHostLayout host) {
         host.getViewTreeObserver().addOnPreDrawListener(() -> {
-            if (host != sHostRef.get() || !host.isAttachedToWindow()) {
+            if (host != sHostRef.get() || !isRenderingActive(host)) {
                 return true;
             }
             // First, and on its own: anything below must not be able to stop the
@@ -1647,6 +1867,13 @@ final class LiquidGlassInstaller {
                     return true;
                 }
                 followBarOffset(host);
+                BiliTabMirror.sync(host);
+                if (LiquidGlassModule.app() == HostApp.BILIBILI
+                        && !BiliTabMirror.isReady(host)) {
+                    View pendingDroplet = sDropletRef.get();
+                    if (pendingDroplet != null) pendingDroplet.setVisibility(View.INVISIBLE);
+                    return true;
+                }
                 if (scheduleTabStructureRefreshIfNeeded(host)) {
                     return true;
                 }
@@ -1666,6 +1893,12 @@ final class LiquidGlassInstaller {
                     if (droplet != null) droplet.setVisibility(View.INVISIBLE);
                     sLastIndex = -1;
                 }
+                View droplet = sDropletRef.get();
+                // The mirror's slots have no width until the frame after they
+                // are inserted. Remembering the index first would skip the
+                // placement forever, so an unplaced droplet keeps asking.
+                boolean unplaced = droplet != null
+                        && droplet.getVisibility() != View.VISIBLE;
                 if (sel >= 0 && sel != sLastIndex) {
                     boolean first = sLastIndex < 0;
                     sLastIndex = sel;
@@ -1679,6 +1912,8 @@ final class LiquidGlassInstaller {
                     if (pgr != null && !experimentalHost()) {
                         pgr.post(() -> extendPagesToBottom(pgr));
                     }
+                } else if (unplaced && sel >= 0) {
+                    syncDropletSize(sel);
                 }
             } catch (Throwable ignored) {
             }
@@ -1698,7 +1933,7 @@ final class LiquidGlassInstaller {
     /** Draws the frame that settles a disagreement, in case nothing else would. */
     private static final Runnable sPageBarSettle = () -> {
         LiquidGlassHostLayout host = sHostRef.get();
-        if (host != null && sPageBarDisagreeSinceMs != 0L) {
+        if (isRenderingActive(host) && sPageBarDisagreeSinceMs != 0L) {
             host.invalidate();
         }
     };
@@ -1766,7 +2001,7 @@ final class LiquidGlassInstaller {
      */
     private static final ClockThrottle sPageExtent = new ClockThrottle(500L, () -> {
         ViewGroup pager = sPagerRef.get();
-        if (pager != null && pager.isAttachedToWindow()) {
+        if (isRenderingActive(sHostRef.get()) && pager != null && pager.isAttachedToWindow()) {
             extendPagesToBottom(pager);
         }
     });
@@ -2059,8 +2294,9 @@ final class LiquidGlassInstaller {
         if (Build.VERSION.SDK_INT < 30) {
             return false;
         }
-        if (experimentalHost() || LiquidGlassModule.app() == HostApp.QQ) {
-            return false; // Preserve unverified hosts' window/IME inset handling
+        if (experimentalHost() || LiquidGlassModule.app() == HostApp.QQ
+                || LiquidGlassModule.app() == HostApp.BILIBILI) {
+            return false; // Preserve host window and IME inset handling.
         }
         try {
             Activity activity = activityOf(ctx);
@@ -2228,13 +2464,99 @@ final class LiquidGlassInstaller {
         return insets.getSystemWindowInsetBottom();
     }
 
+    /**
+     * Params the parent will actually honor.
+     *
+     * <p>{@code generateLayoutParams} returns the parent's own subclass, which
+     * is what {@code addView} keeps. A {@code FrameLayout.LayoutParams} handed
+     * to a {@code CoordinatorLayout} is rebuilt without its gravity, and the
+     * bar then sits at the top of the screen.
+     */
+    private static ViewGroup.MarginLayoutParams anchoredParams(
+            ViewGroup parent, int width, int height, int gravity, int bottomMargin) {
+        FrameLayout.LayoutParams seed = new FrameLayout.LayoutParams(
+                width, height, gravity);
+        seed.bottomMargin = bottomMargin;
+        ViewGroup.LayoutParams generated = seed;
+        try {
+            // Protected on ViewGroup; the override that knows about gravity
+            // lives on the concrete parent (CoordinatorLayout, FrameLayout).
+            java.lang.reflect.Method gen = null;
+            for (Class<?> c = parent.getClass(); c != null && c != Object.class;
+                    c = c.getSuperclass()) {
+                try {
+                    gen = c.getDeclaredMethod("generateLayoutParams",
+                            ViewGroup.LayoutParams.class);
+                    break;
+                } catch (NoSuchMethodException ignored) {
+                }
+            }
+            if (gen != null) {
+                gen.setAccessible(true);
+                Object made = gen.invoke(parent, seed);
+                if (made instanceof ViewGroup.LayoutParams) {
+                    generated = (ViewGroup.LayoutParams) made;
+                }
+            }
+        } catch (Throwable t) {
+            LiquidGlassModule.logErr("generateLayoutParams failed for "
+                    + parent.getClass().getName(), t);
+        }
+        applyGravity(generated, gravity);
+        if (generated instanceof ViewGroup.MarginLayoutParams) {
+            ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) generated;
+            mlp.bottomMargin = bottomMargin;
+            return mlp;
+        }
+        return seed;
+    }
+
+    /** Writes {@code gravity} onto whatever params class the parent produced. */
+    private static void applyGravity(ViewGroup.LayoutParams lp, int gravity) {
+        for (Class<?> c = lp.getClass(); c != null && c != Object.class;
+                c = c.getSuperclass()) {
+            try {
+                java.lang.reflect.Field g = c.getDeclaredField("gravity");
+                if (g.getType() != int.class) {
+                    continue;
+                }
+                g.setAccessible(true);
+                g.setInt(lp, gravity);
+                return;
+            } catch (NoSuchFieldException ignored) {
+            } catch (Throwable t) {
+                LiquidGlassModule.logErr("could not set layout gravity on "
+                        + lp.getClass().getName(), t);
+                return;
+            }
+        }
+    }
+
+    private static int gravityOf(ViewGroup.LayoutParams lp) {
+        for (Class<?> c = lp.getClass(); c != null && c != Object.class;
+                c = c.getSuperclass()) {
+            try {
+                java.lang.reflect.Field g = c.getDeclaredField("gravity");
+                if (g.getType() != int.class) {
+                    continue;
+                }
+                g.setAccessible(true);
+                return g.getInt(lp);
+            } catch (NoSuchFieldException ignored) {
+            } catch (Throwable ignored) {
+                return -1;
+            }
+        }
+        return -1;
+    }
+
     /** Keeps an already-installed pill anchored when system insets change. */
     private static void syncHostBottomInset(LiquidGlassHostLayout host, int inset) {
         ViewGroup.LayoutParams raw = host.getLayoutParams();
-        if (!(raw instanceof FrameLayout.LayoutParams)) {
+        if (!(raw instanceof ViewGroup.MarginLayoutParams)) {
             return;
         }
-        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) raw;
+        ViewGroup.MarginLayoutParams lp = (ViewGroup.MarginLayoutParams) raw;
         float density = host.getResources().getDisplayMetrics().density;
         int desired = Math.round(density * GlassConfig.barOffsetDp)
                 - host.shadowPad() + Math.max(0, inset);
@@ -2418,6 +2740,15 @@ final class LiquidGlassInstaller {
             // height = bar height - 2 * 4dp padding.
             int inset = Math.round(density * 4f);
             int w = tab.getWidth();
+            if (LiquidGlassModule.app() == HostApp.BILIBILI) {
+                int inner = host.getWidth() - host.getPaddingLeft()
+                        - host.getPaddingRight();
+                int count = TabBarBridge.tabCount(tabRow);
+                // A slot that is still the whole pill is not a column yet.
+                if (count > 1 && inner > 0 && w > inner / count + inset) {
+                    return;
+                }
+            }
             // The column can measure taller than the pill — QQ lays its tabs out
             // at the old docked height and lets the bar clip them — so the
             // droplet is held inside the pill rather than hanging out of its
