@@ -392,7 +392,7 @@ final class LiquidGlassHostLayout extends FrameLayout {
     void attach() {
         detach();
         mPreDrawListener = () -> {
-            if (!mCapturing && isAttachedToWindow()
+            if (!mCapturing && LiquidGlassInstaller.isRenderingActive(this)
                     && getVisibility() == VISIBLE
                     && getWidth() > 0 && getHeight() > 0) {
                 capture();
@@ -402,6 +402,15 @@ final class LiquidGlassHostLayout extends FrameLayout {
         mSampleRoot.getViewTreeObserver().addOnPreDrawListener(mPreDrawListener);
         invalidate();
         playRevealAnimation();
+    }
+
+    void suspendWork() {
+        mThemeProbe.cancel();
+        animate().cancel();
+        // If pause interrupted the initial reveal, do not leave the bar faded.
+        setAlpha(1f);
+        setScaleX(1f);
+        setScaleY(1f);
     }
 
     void detach() {
@@ -518,6 +527,7 @@ final class LiquidGlassHostLayout extends FrameLayout {
 
     /** Reads dark/light through the same signal {@link #resolveDark} picked at install. */
     private void probeTheme() {
+        if (!LiquidGlassInstaller.isRenderingActive(this)) return;
         // Only walk the labels for the apps that are decided by them; for the
         // rest this stays the config read it always was.
         HostApp app = LiquidGlassModule.app();

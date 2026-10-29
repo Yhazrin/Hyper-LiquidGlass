@@ -80,10 +80,32 @@ final class HostApp {
             true,
             "com.tencent.mobileqq.");
 
-    // Experimental: semantic discovery only; no unverified app class names/hooks.
-    static final HostApp BILIBILI = experimental("tv.danmaku.bili", "tv.danmaku.bili.MainActivityV2",
-            new NavigationProfile(4, 5,
-                    new String[]{"首页", "动态", "会员购", "我的", "会员", "发布"}, "首页", "动态", "我的"));
+
+    /**
+     * Bilibili 9.16.1, read off a live {@code MainActivityV2}.
+     *
+     * <p>The home frame is the same shape as the other two: a full-bleed content
+     * sibling with {@code WindowAwareComposeView} (id {@code tab_host}) floating
+     * on the bottom of it. The bar itself is Compose, so it has no tab child
+     * views and paints its own opaque fill. Those two differences are handled
+     * beside this table — see {@code BiliGlass} and {@code BiliTabMirror}.
+     * The bar's parent is a {@code CoordinatorLayout}, so the pill has to be
+     * anchored with that class's own layout params or it sticks to the top.
+     */
+    static final HostApp BILIBILI = new HostApp(
+            "tv.danmaku.bili",
+            "tv.danmaku.bili.MainActivityV2",
+            new String[]{
+                    "tv.danmaku.bili.home.components.bottomtab.WindowAwareComposeView",
+            },
+            new String[0],
+            "",
+            new String[0],
+            new String[0],
+            false,
+            "tv.danmaku.bili.");
+
+
     static final HostApp DOUYIN = experimental("com.ss.android.ugc.aweme",
             "com.ss.android.ugc.aweme.main.MainActivity",
             new NavigationProfile(4, 5,
@@ -120,6 +142,7 @@ final class HostApp {
         return pkg.equals(packageName) && (launcherActivity.isEmpty()
                 ? isExperimental() : launcherActivity.equals(className));
     }
+
 
     /** Package name, which is also the name of the process the home screen lives in. */
     final String pkg;

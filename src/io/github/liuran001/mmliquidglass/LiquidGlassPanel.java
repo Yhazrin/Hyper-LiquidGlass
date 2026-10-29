@@ -272,7 +272,9 @@ final class LiquidGlassPanel extends View {
         mCaptured = true;
         ViewGeom.unscaledScreenPos(this, mCapturedAt);
         mCapturedScale = ViewGeom.cumulativeScale(this);
-        drawPanel(canvas, w, h, h * 0.5f, mNode, mCapturedAt, mCapturedScale);
+        long started = System.nanoTime();
+        try { drawPanel(canvas, w, h, h * 0.5f, mNode, mCapturedAt, mCapturedScale); }
+        finally { GlassMetrics.panel(System.nanoTime() - started); }
     }
 
     @Override
@@ -309,7 +311,8 @@ final class LiquidGlassPanel extends View {
      */
     private boolean backdropStale() {
         ViewGroup pager = mBackdropRef.get();
-        if (!mSupported || pager == null || getWidth() <= 0 || getHeight() <= 0
+        if (!LiquidGlassInstaller.isRenderingActive(this)
+                || !mSupported || pager == null || getWidth() <= 0 || getHeight() <= 0
                 || !isShown() || getAlpha() == 0f || !pager.isShown()) {
             // Nothing to show it on: taken afresh once there is again.
             mCaptured = false;
