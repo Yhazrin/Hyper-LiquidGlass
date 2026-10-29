@@ -99,6 +99,7 @@ final class LiquidGlassInstaller {
     private static DropletDragController sDrag;
     /** Identity/children fingerprint of the row the renderer is currently bound to. */
     private static int sTabStructureSignature;
+    private static int sNavigationSlotsSignature;
     private static boolean sTabStructureRefreshPosted;
     /**
      * Uptime since which the live tab row has been unusable while the old
@@ -290,6 +291,7 @@ final class LiquidGlassInstaller {
         sPagerRef = new WeakReference<>(null);
         sDrag = null;
         sTabStructureSignature = 0;
+        sNavigationSlotsSignature = 0;
         sTabStructureRefreshPosted = false;
         sTabRowEmptySinceMs = 0L;
         sBarHeight = 0;
@@ -580,6 +582,7 @@ final class LiquidGlassInstaller {
         sTabViewRef = new WeakReference<>(tabView);
         sTabRowRef = new WeakReference<>(tabRow);
         sTabStructureSignature = tabStructureSignature(tabRow);
+        sNavigationSlotsSignature = navigationSlotsSignature(tabRow);
         sTabStructureRefreshPosted = false;
         sPagerRef = new WeakReference<>(backdrop);
         sBarHeight = barHeight;
@@ -1369,7 +1372,9 @@ final class LiquidGlassInstaller {
         if (tabRow == null || tabRow.getChildCount() == 0) {
             return 0;
         }
+        boolean qq = LiquidGlassModule.app() == HostApp.QQ;
         boolean iconOnly = isQqIconOnlyRow(tabRow);
+        int qqContent = Math.round(density * 24f);
         applyQqIconOnlyAlignment(tabRow, iconOnly, density);
         int childCount = tabRow.getChildCount();
         int count = 0;
@@ -1383,8 +1388,20 @@ final class LiquidGlassInstaller {
                 continue;
             }
             count++;
-            tab.measure(unspecified, unspecified);
-            measured = Math.max(measured, tab.getMeasuredWidth());
+            if (qq) {
+                // Do not remeasure a column after we assigned its fixed width:
+                // QQ can report that imposed width as its intrinsic content.
+                android.widget.TextView title = findTabTitle(tab);
+                if (!iconOnly && title != null && hasUsableTabTitle(tab)) {
+                    int natural = (int) Math.ceil(android.text.Layout.getDesiredWidth(
+                            title.getText(), title.getPaint()))
+                            + title.getCompoundPaddingLeft() + title.getCompoundPaddingRight();
+                    qqContent = Math.max(qqContent, natural);
+                }
+            } else {
+                tab.measure(unspecified, unspecified);
+                measured = Math.max(measured, tab.getMeasuredWidth());
+            }
             leaf = Math.max(leaf, leafContentWidth(tab));
             slot = Math.max(slot, tab.getWidth());
         }
@@ -1413,7 +1430,8 @@ final class LiquidGlassInstaller {
         // pill grow and shrink with unread counts. Use a stable 24dp content
         // basis, which together with the normal 32dp breathing room gives each
         // icon a 56dp touch column.
-        int widest = iconOnly ? Math.round(density * 24f) : Math.max(measured, leaf);
+        int widest = qq ? (iconOnly ? Math.round(density * 24f) : qqContent)
+                : Math.max(measured, leaf);
         if (widest <= 0) {
             return 0;
         }
@@ -1437,15 +1455,22 @@ final class LiquidGlassInstaller {
             if (lp == null) {
                 continue;
             }
-            lp.width = tabWidth;
+            boolean changed = lp.width != tabWidth;
             if (lp instanceof android.widget.LinearLayout.LayoutParams) {
-                ((android.widget.LinearLayout.LayoutParams) lp).weight = 0f;
+                android.widget.LinearLayout.LayoutParams linear =
+                        (android.widget.LinearLayout.LayoutParams) lp;
+                changed |= linear.weight != 0f;
+                linear.weight = 0f;
             }
-            tab.setLayoutParams(lp);
+            lp.width = tabWidth;
+            if (changed) tab.setLayoutParams(lp);
         }
         // Horizontal inset only: the bar's height is WeChat's own and adding
         // vertical padding pushes the tabs out through the bottom of the pill.
-        tabRow.setPadding(pad, 0, pad, 0);
+        if (tabRow.getPaddingLeft() != pad || tabRow.getPaddingRight() != pad
+                || tabRow.getPaddingTop() != 0 || tabRow.getPaddingBottom() != 0) {
+            tabRow.setPadding(pad, 0, pad, 0);
+        }
         int total = tabWidth * count + pad * 2;
         LiquidGlassModule.log(android.util.Log.INFO,
                 "tab row hugged: content=" + widest
@@ -1651,6 +1676,21 @@ final class LiquidGlassInstaller {
      * restoring {@code width=0, weight=1}, and either transition must re-hug the
      * existing row.
      */
+    /** Navigation identity excludes icon children and transient LayoutParams.
+     * Native icon animations may replace either without replacing a tab slot.
+     */
+    private static int navigationSlotsSignature(ViewGroup row) {
+        if (row == null) return 0;
+        int key = System.identityHashCode(row);
+        key = 31 * key + row.getChildCount();
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View tab = row.getChildAt(i);
+            key = 31 * key + System.identityHashCode(tab);
+            key = 31 * key + (tab.getVisibility() == View.GONE ? 1 : 0);
+        }
+        return key;
+    }
+
     private static int tabStructureSignature(ViewGroup tabRow) {
         if (tabRow == null) {
             return 0;
@@ -1761,6 +1801,10 @@ final class LiquidGlassInstaller {
                 return;
             }
 
+            boolean preserveAnimation = LiquidGlassModule.app() == HostApp.QQ
+                    && tabRow == sTabRowRef.get()
+                    && navigationSlotsSignature(tabRow) == sNavigationSlotsSignature;
+
             // Newly created Material TabViews bring QQ's own backgrounds and
             // equal-weight widths and docked height back with them. Apply the
             // same treatment as the initial install, then resize the already-live
@@ -1791,22 +1835,24 @@ final class LiquidGlassInstaller {
 
             sTabRowRef = new WeakReference<>(tabRow);
             sTabStructureSignature = tabStructureSignature(tabRow);
+            sNavigationSlotsSignature = navigationSlotsSignature(tabRow);
             View droplet = sDropletRef.get();
             if (droplet instanceof DropletPanel) {
                 ((DropletPanel) droplet).setTabRow(tabRow);
             }
-            if (sDrag != null) {
+            if (sDrag != null && !preserveAnimation) {
                 sDrag.setTabRow(tabRow);
             }
 
             // The next pre-draw runs after the requested layout and snaps the
             // droplet to the selected tab using the new geometry.
-            sLastIndex = -1;
+            if (!preserveAnimation) sLastIndex = -1;
             tabRow.requestLayout();
             tabView.requestLayout();
             host.requestLayout();
             LiquidGlassModule.log(android.util.Log.INFO,
                     "tab structure rebound: row=" + tabRow.getClass().getName()
+                            + " animation=" + (preserveAnimation ? "preserved" : "rebound")
                             + " children=" + tabRow.getChildCount()
                             + " hostWidth=" + (lp == null ? 0 : lp.width)
                             + " barHeight=" + sBarHeight);
